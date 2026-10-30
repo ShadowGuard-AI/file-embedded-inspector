@@ -1,3 +1,5 @@
+![Banner](banner.png)
+
 # file-embedded-inspector
 Scans files for embedded objects (e.g., ZIP archives within documents, hidden files) and reports their presence and type. - Focused on File operations and analysis
 

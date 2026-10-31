@@ -1,5 +1,6 @@
 import argparse
 import logging
+import sys
 import os
 import zipfile
 from pathlib import Path
@@ -18,34 +19,45 @@ def setup_argparse():
     parser.add_argument("file_path", type=str, help="Path to the file to be analyzed.")
     return parser
 
-def is_zip_file_embedded(file_path):
-    """
-    Checks if a file contains a ZIP archive embedded within it.
+SIGNATURES = {
+    "ZIP": b"PK\x03\x04",
+    "PNG": b"\x89PNG\r\n\x1a\n",
+    "JPEG": b"\xff\xd8\xff",
+    "GIF": b"GIF8",
+    "PDF": b"%PDF",
+    "MZ": b"MZ",
+}
 
-    Args:
-        file_path (str): Path to the file to check.
+CHUNK_SIZE = 4096
 
-    Returns:
-        bool: True if a ZIP archive is found, False otherwise.
+
+def find_embedded_signatures(file_path):
+    """Scan a file for known signatures, overlapping chunk reads so a
+    signature straddling a chunk boundary is still found.
+
+    Returns a list of (offset, type name) pairs, in offset order.
     """
-    try:
-        with open(file_path, 'rb') as f:
-            # Read the file in chunks to handle large files
-            chunk_size = 4096
-            while True:
-                chunk = f.read(chunk_size)
-                if not chunk:
-                    break
-                if b"PK\x03\x04" in chunk:  # ZIP file signature
-                   return True
-            
-    except FileNotFoundError:
-        logging.error(f"File not found: {file_path}")
-        return False
-    except Exception as e:
-        logging.error(f"Error checking file for embedded zip: {e}")
-        return False
-    return False
+    longest = max(len(sig) for sig in SIGNATURES.values())
+    overlap = longest - 1
+    found = {}
+    buffer = b""
+    buffer_start = 0
+    with open(file_path, 'rb') as f:
+        while True:
+            chunk = f.read(CHUNK_SIZE)
+            if not chunk:
+                break
+            buffer = buffer + chunk
+            for name, sig in SIGNATURES.items():
+                pos = buffer.find(sig)
+                while pos != -1:
+                    found[buffer_start + pos] = name
+                    pos = buffer.find(sig, pos + 1)
+            if len(buffer) > overlap:
+                drop = len(buffer) - overlap
+                buffer = buffer[drop:]
+                buffer_start += drop
+    return sorted(found.items())
 
 
 def detect_hidden_files(file_path):
@@ -79,35 +91,48 @@ def detect_hidden_files(file_path):
     return False
 
 def main():
-    """
-    Main function to execute the file embedded inspector.
-    """
     parser = setup_argparse()
     args = parser.parse_args()
     file_path = args.file_path
 
-    # Input validation
     if not file_path:
         logging.error("File path is required.")
-        return
+        sys.exit(1)
 
     if not os.path.exists(file_path):
-         logging.error(f"File does not exist: {file_path}")
-         return
+        logging.error(f"File does not exist: {file_path}")
+        sys.exit(1)
+
+    if not os.path.isfile(file_path):
+        logging.error(f"Not a file: {file_path}")
+        sys.exit(1)
+
+    if os.path.getsize(file_path) == 0:
+        logging.error(f"File is empty, nothing to inspect: {file_path}")
+        sys.exit(1)
 
     logging.info(f"Analyzing file: {file_path}")
 
-    # Check for embedded ZIP archives
-    if is_zip_file_embedded(file_path):
-        logging.warning(f"Detected an embedded ZIP archive in: {file_path}")
+    try:
+        hits = find_embedded_signatures(file_path)
+    except Exception as e:
+        logging.error(f"Error checking file for embedded content: {e}")
+        sys.exit(1)
 
-    # Check for hidden file
-    if detect_hidden_files(file_path):
+    embedded = []
+    for offset, name in hits:
+        if offset == 0:
+            logging.info(f"File type: {name} (signature at offset 0, the file's own type, not embedded content)")
+        else:
+            embedded.append((offset, name))
+            logging.warning(f"Detected an embedded {name} signature at offset {offset} in: {file_path}")
+
+    hidden = detect_hidden_files(file_path)
+    if hidden:
         logging.warning(f"Detected a hidden file: {file_path}")
-    
 
-    if not is_zip_file_embedded(file_path) and not detect_hidden_files(file_path):
-         logging.info(f"No embedded objects detected in: {file_path}")
+    if not embedded and not hidden:
+        logging.info(f"No embedded objects detected in: {file_path}")
 
 
 if __name__ == "__main__":

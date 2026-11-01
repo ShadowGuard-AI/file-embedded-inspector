@@ -38,6 +38,9 @@ def find_embedded_signatures(file_path):
     Returns a list of (offset, type name) pairs, in offset order.
     """
     longest = max(len(sig) for sig in SIGNATURES.values())
+    # The overlap is one byte less than the longest signature. Keeping that
+    # many bytes from the previous buffer guarantees any signature split
+    # across a chunk boundary appears whole in exactly one buffer.
     overlap = longest - 1
     found = {}
     buffer = b""
@@ -51,6 +54,11 @@ def find_embedded_signatures(file_path):
             for name, sig in SIGNATURES.items():
                 pos = buffer.find(sig)
                 while pos != -1:
+                    # Results are keyed by offset in a dict, not collected in a list. The
+                    # overlap region is searched again in the next pass, so the same hit
+                    # would be found twice; the dict absorbs the duplicate, and two
+                    # different signatures can never share an offset with these first
+                    # bytes. Stepping by one after a hit keeps overlapping occurrences.
                     found[buffer_start + pos] = name
                     pos = buffer.find(sig, pos + 1)
             if len(buffer) > overlap:
@@ -78,6 +86,10 @@ def detect_hidden_files(file_path):
         try:
             import ctypes
             FILE_ATTRIBUTE_HIDDEN = 0x02
+            # A trap in this Windows branch: GetFileAttributesW returns -1 on
+            # error, and -1 has every bit set, so the hidden test below passes for
+            # a file Windows could not even stat. The exception handler does not
+            # catch that, because no exception is raised.
             attributes = ctypes.windll.kernel32.GetFileAttributesW(str(path))
             if attributes & FILE_ATTRIBUTE_HIDDEN:
                 return True
@@ -121,6 +133,11 @@ def main():
 
     embedded = []
     for offset, name in hits:
+        # A signature at offset zero is the file introducing itself, not
+        # something embedded in it, so it is reported as the file's type and
+        # kept out of the embedded list. Everything past zero counts, though
+        # nothing validates that a payload actually follows the signature:
+        # the right bytes inside compressed data will read as a hit.
         if offset == 0:
             logging.info(f"File type: {name} (signature at offset 0, the file's own type, not embedded content)")
         else:
@@ -131,6 +148,9 @@ def main():
     if hidden:
         logging.warning(f"Detected a hidden file: {file_path}")
 
+    # Findings never change the exit code. This is a reporting tool: a file
+    # full of embedded signatures and a clean file both exit 0, and only a
+    # file that cannot be inspected at all exits 1, in the checks above.
     if not embedded and not hidden:
         logging.info(f"No embedded objects detected in: {file_path}")
 
